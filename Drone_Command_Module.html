@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Drone Command Center</title>
+
+  <style>
+    html, body, #viewDiv { padding: 0; margin: 0; height: 100%; width: 100%; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+    
+    /* HUD / MINIMAP STYLE */
+    #hudDiv {
+        position: absolute;
+        top: 20px;
+        left: 20px; 
+        width: 300px;
+        height: 300px;
+        border-radius: 50%; 
+        border: 2px solid #00ffff;
+        box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        overflow: hidden;
+        z-index: 99;
+        background: rgba(0, 0, 0, 0.8);
+    }
+
+    /* STATUS PANEL */
+    #status { 
+        position: absolute; 
+        top: 20px; 
+        right: 20px; /* <--- MOVED TO RIGHT */
+        color: #00ffff; 
+        background: rgba(0, 20, 40, 0.9); 
+        padding: 12px 20px; 
+        font-family: 'Courier New', monospace; 
+        border: 1px solid #00ffff; 
+        border-radius: 4px; 
+        z-index: 99; 
+        font-weight: bold; 
+    }
+
+    /* BOTTOM COMMAND BAR */
+    #commandModal { position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); width: 650px; background: rgba(10, 10, 10, 0.95); padding: 15px; border-radius: 8px; border: 1px solid #444; display: flex; gap: 10px; align-items: center; z-index: 99; }
+    input[type="text"] { flex: 1; padding: 12px; background: #222; border: 1px solid #555; color: #fff; border-radius: 4px; outline: none; font-size: 16px; }
+    input[type="text"]:focus { border-color: #00ffff; background: #333; }
+    button { padding: 12px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; color: white; transition: all 0.2s; }
+    #cmdBtn { background: #0088cc; } 
+    #resetBtn { background: #cc3300; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    .toggle-container { display: flex; align-items: center; color: #ccc; font-size: 12px; font-weight: bold; margin-left: 10px; }
+    .toggle-container input { margin-right: 5px; transform: scale(1.5); cursor: pointer; }
+
+    /* CUSTOM RESET MODAL (Dark Overlay) */
+    #confirmModal {
+      display: none; 
+      position: fixed;
+      z-index: 200; 
+      left: 0; top: 0;
+      width: 100%; height: 100%;
+      background-color: rgba(0, 0, 0, 0.7); 
+      backdrop-filter: blur(2px);
+    }
+
+    /* The Box Itself */
+    .modal-content {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background-color: #111;
+      border: 1px solid #00ffff;
+      box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+      padding: 30px; text-align: center; border-radius: 8px; width: 300px;
+    }
+    .modal-text { color: white; font-size: 18px; margin-bottom: 25px; font-weight: bold; }
+    .modal-buttons { display: flex; justify-content: center; gap: 15px; }
+    .yes-btn { background: #cc3300; padding: 10px 25px; }
+    .no-btn { background: #444; padding: 10px 25px; }
+    .yes-btn:hover { background: #ff4444; } .no-btn:hover { background: #666; }
+  </style>
+
+  <link rel="stylesheet" href="https://js.arcgis.com/4.28/esri/themes/dark/main.css" />
+  <script src="https://js.arcgis.com/4.28/"></script>
+
+  <script>
+    require([
+      "esri/WebScene",
+      "esri/views/SceneView",
+      "esri/layers/GraphicsLayer",
+      "esri/Graphic",
+      "esri/layers/SceneLayer", // REMOVED Compass from require
+      "esri/geometry/Point",
+      "esri/geometry/support/webMercatorUtils"
+    ], (WebScene, SceneView, GraphicsLayer, Graphic, SceneLayer, Point, webMercatorUtils) => {
+
+      // ==============================
+      // 1. SCENE SETUP
+      // ==============================
+      const SCENE_ID = "c0aba80f32e04001ad356d429645ba32";
+      const scene = new WebScene({ portalItem: { id: SCENE_ID } });
+
+      const buildingsLayer = new SceneLayer({
+        portalItem: { id: "ca0470dbbddb4db0b220c5b16e1333e6" },
+        title: "3D Buildings",
+        popupEnabled: false
+      });
+      scene.add(buildingsLayer);
+
+      // MAIN VIEW
+      const view = new SceneView({
+        container: "viewDiv",
+        map: scene,
+        qualityProfile: "medium",
+        ui: { components: [] } // <--- REMOVED ZOOM BUTTONS
+      });
+
+      // REMOVED COMPASS WIDGET CODE HERE
+
+      const visualLayer = new GraphicsLayer({ elevationInfo: { mode: "absolute-height" } });
+      scene.add(visualLayer);
+
+      // ==============================
+      // 2. HUD / MINIMAP SETUP
+      // ==============================
+      const hudView = new SceneView({
+        container: "hudDiv",      // Links to the new circular Div
+        map: scene,               // Uses the EXACT SAME scene/map
+        ui: { components: [] },   // No controls
+        qualityProfile: "low",    // Fast rendering
+        environment: {
+            atmosphereEnabled: false,
+            starsEnabled: false
+        },
+        alphaCompositingEnabled: true
+      });
+      // ==============================
+      // MIDDLE MOUSE ROTATE LOGIC
+      // ==============================
+      let lastDragPt = null;
+
+      view.on("drag", (event) => {
+        // Only active if Free Look is Checked
+        const isFreeLook = document.getElementById("freeLookCheck")?.checked;
+        if (!isFreeLook) return;
+
+        // Button 1 is Middle Mouse / Scroll Wheel Click
+        if (event.button === 1) {
+          event.stopPropagation(); // Stop default Pan
+
+          if (event.action === "start") {
+            lastDragPt = { x: event.x, y: event.y };
+          } 
+          else if (event.action === "update" && lastDragPt) {
+            const dx = event.x - lastDragPt.x;
+            const dy = event.y - lastDragPt.y;
+            lastDragPt = { x: event.x, y: event.y };
+
+            // ROTATION SENSITIVITY
+            const ROT_SPEED = 0.3; 
+
+            const newHeading = view.camera.heading + (dx * ROT_SPEED);
+            // Clamp tilt so you don't flip upside down
+            const newTilt = Math.min(179, Math.max(0, view.camera.tilt - (dy * ROT_SPEED)));
+
+            view.goTo({
+              heading: newHeading,
+              tilt: newTilt
+            }, { animate: false });
+          } 
+          else if (event.action === "end") {
+            lastDragPt = null;
+          }
+        }
+      });
+      // ==============================
+      // 3. HELPERS
+      // ==============================
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function lerpAngle(a, b, t) {
+        const delta = ((b - a + 540) % 360) - 180;
+        return (a + delta * t + 360) % 360;
+      }
+      function expAlpha(dt, tau) { return 1 - Math.exp(-dt / Math.max(0.0001, tau)); }
+      function easeSoft(t) { return Math.max(0, Math.min(1, t)); }
+
+      const DRONE_POS_TAU = 0.16;
+      const DRONE_ANG_TAU = 0.10; 
+      const CAM_KEYFRAME_MS = 250;
+      const CAM_GLIDE_MS    = 1000;
+      const FOLLOW_DISTANCE = 120;
+      const FOLLOW_HEIGHT   = 28;
+      const FOLLOW_TILT     = 80;
+      const SYMBOL_UPDATE_MS = 16; 
+      const FETCH_MS = 50;
+      let inFlight = false;
+
+      // ==============================
+      // 4. TELEMETRY
+      // ==============================
+      let telemetry = null;
+
+      function onTelemetry(data) {
+        const geo = new Point({
+          longitude: data.lon,
+          latitude: data.lat,
+          z: data.alt ?? 0,
+          spatialReference: { wkid: 4326 }
+        });
+        const projected = webMercatorUtils.geographicToWebMercator(geo);
+
+        telemetry = {
+          point: projected,
+          heading: Number.isFinite(data.heading) ? data.heading : 0,
+          pitch:   Number.isFinite(data.pitch) ? data.pitch : 0,
+          roll:    Number.isFinite(data.roll) ? data.roll : 0,
+          alt:     Number.isFinite(data.alt) ? data.alt : 0
+        };
+
+        const s = document.getElementById("status");
+        if (s) {
+          s.innerHTML =
+            `SYSTEM: <span style='color:#0f0'>ONLINE</span> <br>
+             ALT: ${telemetry.alt.toFixed(1)}m | HEAD: ${Math.round(telemetry.heading)}°`;
+          s.style.borderColor = "#00ffff";
+        }
+      }
+
+      // ==============================
+      // 5. RINGS
+      // ==============================
+      const ringGraphicsMap = new Map();
+
+      function updateRings(ringsData) {
+        if (!ringsData) return;
+        ringsData.forEach(ring => {
+          const color = ring.hit ? [0, 255, 0] : [255, 0, 0];
+          const ringHeading = ring.heading !== undefined ? ring.heading : 0;
+          const ringRoll = ring.roll !== undefined ? ring.roll : 0;
+
+          if (ringGraphicsMap.has(ring.id)) {
+            const g = ringGraphicsMap.get(ring.id);
+            const layer = g.symbol.symbolLayers.getItemAt(0);
+            if (layer.material.color.r !== color[0] || 
+                layer.heading !== ringHeading || 
+                layer.roll !== ringRoll) {
+              const sym = g.symbol.clone();
+              const l = sym.symbolLayers.getItemAt(0);
+              l.material = { color: color };
+              l.heading = ringHeading;
+              l.roll = ringRoll;
+              g.symbol = sym;
+            }
+          } else {
+            const g = new Graphic({
+              geometry: new Point({
+                latitude: ring.lat, longitude: ring.lon, z: ring.alt, spatialReference: { wkid: 4326 }
+              }),
+              symbol: {
+                type: "point-3d",
+                symbolLayers: [{
+                  type: "object",
+                  resource: { href: "http://127.0.0.1:8000/static/ring.glb" },
+                  width: 1.5, height: 50, depth: 50,
+                  tilt: 0, heading: ringHeading, roll: ringRoll,     
+                  material: { color: color }
+                }]
+              }
+            });
+            visualLayer.add(g);
+            ringGraphicsMap.set(ring.id, g);
+          }
+        });
+      }
+
+      function pollTelemetry() {
+        if (inFlight) return;
+        inFlight = true;
+        fetch("http://127.0.0.1:8000/drone-data", { cache: "no-store" })
+          .then(r => r.json())
+          .then(data => {
+            if (data.drone) onTelemetry(data.drone);
+            if (data.rings) updateRings(data.rings);
+            if (!data.drone && data.lat) onTelemetry(data);
+          })
+          .catch(() => {})
+          .finally(() => { inFlight = false; });
+      }
+
+      // ==============================
+      // 6. DRONE GRAPHICS
+      // ==============================
+      let droneGraphic = null;
+      const baseDroneSymbol = {
+        type: "point-3d",
+        symbolLayers: [{
+          type: "object",
+          width: 16.8, depth: 8.22, height: 2.2,
+          resource: { href: "http://127.0.0.1:8000/static/drone_red.glb" },
+          heading: 0, tilt: 0, roll: 0
+        }]
+      };
+
+      let displayedPoint = null;
+      let displayedHeading = 0, displayedPitch = 0, displayedRoll = 0;
+
+      // Camera State
+      let camPoint = null, camHeading = 0, camTilt = FOLLOW_TILT;
+      let segStartPos = null, segEndPos = null;
+      let segStartHeading = 0, segEndHeading = 0;
+      let segStartTilt = FOLLOW_TILT, segEndTilt = FOLLOW_TILT;
+      let segStartTime = 0, lastKeyframeTime = 0;
+      let lastSymbolUpdate = 0, lastFrameTime = performance.now();
+      let lastFreeLook = false;
+
+      function computeChaseTarget(point, headingDeg) {
+        const headingRad = (headingDeg * Math.PI) / 180;
+        return new Point({
+          x: point.x - Math.sin(headingRad) * FOLLOW_DISTANCE,
+          y: point.y - Math.cos(headingRad) * FOLLOW_DISTANCE,
+          z: (point.z ?? 0) + FOLLOW_HEIGHT,
+          spatialReference: point.spatialReference
+        });
+      }
+
+      function refreshCameraSegment(now) {
+        segStartPos = camPoint;
+        segStartHeading = camHeading;
+        segStartTilt = camTilt;
+        segEndPos = computeChaseTarget(displayedPoint, displayedHeading);
+        segEndHeading = displayedHeading;
+        segEndTilt = FOLLOW_TILT;
+        segStartTime = now;
+        lastKeyframeTime = now;
+      }
+
+      // ==============================
+      // 7. ANIMATION LOOP (HUD + VIEW)
+      // ==============================
+      function animate() {
+        requestAnimationFrame(animate);
+        const now = performance.now();
+        const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
+        lastFrameTime = now;
+
+        if (!telemetry) return;
+
+        if (!displayedPoint) {
+          displayedPoint = telemetry.point;
+          displayedHeading = telemetry.heading;
+          displayedPitch = telemetry.pitch;
+          displayedRoll = telemetry.roll;
+
+          droneGraphic = new Graphic({ geometry: displayedPoint, symbol: baseDroneSymbol });
+          visualLayer.add(droneGraphic);
+
+          camPoint = computeChaseTarget(displayedPoint, displayedHeading);
+          camHeading = displayedHeading;
+          camTilt = FOLLOW_TILT;
+
+          segStartPos = camPoint; segEndPos = camPoint;
+          segStartHeading = camHeading; segEndHeading = camHeading;
+          segStartTilt = camTilt; segEndTilt = camTilt;
+          segStartTime = now; lastKeyframeTime = now;
+        }
+
+        const aPos = expAlpha(dt, DRONE_POS_TAU);
+        const aAng = expAlpha(dt, DRONE_ANG_TAU);
+
+        displayedPoint = new Point({
+          x: lerp(displayedPoint.x, telemetry.point.x, aPos),
+          y: lerp(displayedPoint.y, telemetry.point.y, aPos),
+          z: lerp(displayedPoint.z ?? 0, telemetry.point.z ?? 0, aPos),
+          spatialReference: telemetry.point.spatialReference
+        });
+
+        displayedHeading = lerpAngle(displayedHeading, telemetry.heading, aAng);
+        displayedPitch = lerp(displayedPitch, telemetry.pitch, aAng);
+        displayedRoll  = lerp(displayedRoll, telemetry.roll, aAng);
+
+        droneGraphic.geometry = displayedPoint;
+
+        // VISUAL UPDATES
+        if (now - lastSymbolUpdate > SYMBOL_UPDATE_MS) {
+          lastSymbolUpdate = now;
+          const sym = droneGraphic.symbol.clone();
+          const layer = sym.symbolLayers.getItemAt(0);
+
+          const ROLL_GAIN = 1.25; const PITCH_GAIN = 1.35;
+          const MAX_ROLL = 45; const MAX_PITCH = 30;
+
+          layer.heading = displayedHeading;
+          layer.tilt = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, displayedPitch * PITCH_GAIN));
+          layer.roll = Math.max(-MAX_ROLL, Math.min(MAX_ROLL, displayedRoll * ROLL_GAIN));
+          droneGraphic.symbol = sym;
+
+          // --- UPDATE HUD CAMERA (TOP DOWN) ---
+          hudView.camera = {
+            position: {
+                x: displayedPoint.x,
+                y: displayedPoint.y,
+                z: (displayedPoint.z || 0) + 100, // +400m above drone
+                spatialReference: displayedPoint.spatialReference
+            },
+            heading: displayedHeading, // Follow drone nose
+            tilt: 0 // Look Straight Down
+          };
+        }
+
+        // MAIN CAMERA LOGIC
+        const freeLook = document.getElementById("freeLookCheck")?.checked ?? false;
+        if (lastFreeLook && !freeLook) {
+          const vc = view.camera;
+          camPoint = vc.position.clone ? vc.position.clone() : vc.position;
+          camHeading = vc.heading; camTilt = vc.tilt;
+          segStartPos = camPoint; segEndPos = camPoint;
+          segStartHeading = camHeading; segEndHeading = camHeading;
+          segStartTilt = camTilt; segEndTilt = camTilt;
+          segStartTime = now; lastKeyframeTime = now;
+        }
+        lastFreeLook = freeLook;
+
+        if (freeLook) return;
+
+        if (now - lastKeyframeTime >= CAM_KEYFRAME_MS) refreshCameraSegment(now);
+        const t = (now - segStartTime) / CAM_GLIDE_MS;
+        const e = easeSoft(t);
+
+        camPoint = new Point({
+          x: lerp(segStartPos.x, segEndPos.x, e),
+          y: lerp(segStartPos.y, segEndPos.y, e),
+          z: lerp(segStartPos.z, segEndPos.z, e),
+          spatialReference: displayedPoint.spatialReference
+        });
+        camHeading = lerpAngle(segStartHeading, segEndHeading, e);
+        camTilt = lerp(segStartTilt, segEndTilt, e);
+
+        view.camera = { position: camPoint, heading: camHeading, tilt: camTilt };
+      }
+
+      view.when(() => {
+        animate();
+        pollTelemetry();
+        setInterval(pollTelemetry, FETCH_MS);
+      });
+
+      // ==============================
+      // 8. GLOBAL FUNCTIONS (UI)
+      // ==============================
+      window.sendCommand = function() {
+        const input = document.getElementById("cmdInput");
+        const btn = document.getElementById("cmdBtn");
+        if (!input.value) return;
+        btn.innerText = "..."; btn.disabled = true; input.disabled = true;
+        fetch("http://127.0.0.1:8000/send-command", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: input.value })
+        }).then(() => {
+          input.value = "";
+          setTimeout(() => {
+            btn.innerText = "ENGAGE"; btn.disabled = false; input.disabled = false; input.focus();
+          }, 500);
+        });
+      }
+
+      window.resetSystem = function() {
+        // Show Custom Modal
+        document.getElementById("confirmModal").style.display = "block";
+      }
+
+      window.confirmReset = function(choice) {
+        document.getElementById("confirmModal").style.display = "none";
+        if (choice) {
+          fetch("http://127.0.0.1:8000/reset", { method: "POST" });
+          // Update Status to give user feedback
+          const s = document.getElementById("status");
+          if(s) s.innerHTML = "SYSTEM RESETTING...";
+        }
+      }
+    });
+  </script>
+</head>
+
+<body>
+  <div id="viewDiv"></div>
+
+  <div id="hudDiv"></div>
+
+  <div id="status">INITIALIZING...</div>
+
+  <div id="commandModal">
+    <input type="text" id="cmdInput" placeholder="Enter Command..." autocomplete="off" onkeydown="if(event.key === 'Enter') sendCommand()">
+    <button id="cmdBtn" onclick="sendCommand()">ENGAGE</button>
+    <button id="resetBtn" onclick="resetSystem()">RESET</button>
+    <div class="toggle-container">
+      <input type="checkbox" id="freeLookCheck">
+      <label for="freeLookCheck">FREE LOOK</label>
+    </div>
+  </div>
+
+  <div id="confirmModal">
+    <div class="modal-content">
+      <div class="modal-text">RESET SIMULATION?</div>
+      <div class="modal-buttons">
+        <button class="yes-btn" onclick="confirmReset(true)">YES</button>
+        <button class="no-btn" onclick="confirmReset(false)">NO</button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
