@@ -1,5 +1,6 @@
 ## 🎯 Mission Objective
 The goal of this simulation is to pilot an autonomous UAS through a high-fidelity 3D Digital Twin of San Francisco to collect six localized "Red Rings." This serves as a demonstration of **Next-Generation Command & Control (C2)** interfaces where human-machine teaming is prioritized through Natural Language Processing.
+<img width="2541" height="1260" alt="image" src="https://github.com/user-attachments/assets/10e242f4-a165-4cc7-9a56-5cf59775074b" />
 
 ## 🛠️ The Technical "Deep Dive"
 * **Visual Layer (Frontend):** Utilizing the **ArcGIS Maps SDK for JavaScript** to render sub-meter accurate 3D building layers and terrain.
